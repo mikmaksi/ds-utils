@@ -8,12 +8,23 @@ import plotnine as pn
 from sklearn.base import BaseEstimator
 
 
+def identity(x):
+    return x
+
+
 class VisGrid:
-    def __init__(self, model: BaseEstimator, X: pd.DataFrame, n_points: int, target_name: str = "y"):
+    def __init__(self, model: BaseEstimator, X: pd.DataFrame, y: pd.Series, n_points: int):
+        """
+
+        TODO:
+            1. Add the ability to control which features are varried. Current each input feature in X is
+            2. Add the ability to vary interactions of features
+
+        """
         self.model = model
         self.X = X
+        self.y = y
         self.n_points = n_points
-        self.target_name = target_name
 
     def make_grid_avg_predictors(self, agg_func: Literal["mean", "median"] = "mean") -> pd.DataFrame:
         """Make a grid varying each predictor along an even linear spacing, while holding other predictors constant
@@ -218,11 +229,48 @@ class VisGrid:
 
         return grid
 
-    @staticmethod
-    def plot_grid(df: pd.DataFrame, target_name):
-        p = pn.ggplot(df, pn.aes("value", target_name))
+    def plot_grid(
+        self,
+        method=Literal["avg_predictors", "full_interaction", "cross_observed", "unq_observed"],
+        transform_x: bool = False,
+    ):
+        """Plot effect of each predictor on model response overlayed on top of observed data.
+
+        Args:
+            method: method for constructing the visualization grid.
+        """
+
+        if transform_x:
+            if hasattr(self.model[-1], "transform"):
+                transformer = self.model.transform
+            else:
+                transformer = self.model[:-1].transform
+        else:
+            transformer = identity
+
+        # create the grid
+        grid = getattr(self, f"make_grid_{method}")()
+        grid["id"] = (grid.groupby("variable")["variable"].rank(method="first")-1).astype(int).tolist()
+
+        # transform the grid
+        grid_transformed = transformer(pd.pivot(grid, columns="variable", values="value", index="id"))
+        grid_transformed.reset_index(inplace=True)
+
+        # join the predicted value back
+        grid = grid_transformed.melt(id_vars="id").merge(grid.drop(columns="value"), on=["variable", "id"])
+
+        # create the table of observed values in long format
+        observed = pd.concat([transformer(self.X), self.y.rename("y")], axis=1).melt(id_vars="y")
+
+        # keep only the predictors in the grid
+        observed = observed[observed["variable"].isin(self.X.columns)]
+
+        # make plot
+        p = pn.ggplot(grid, pn.aes("value", "ypred"))
+        p = p + pn.geom_point(observed, pn.aes("value", "y"), color="dodgerblue", alpha=0.3)
         p = p + pn.geom_point()
+        if "ypred_std" in grid.columns:
+            p = p + pn.geom_linerange(pn.aes(ymin="ypred-ypred_std", ymax="ypred+ypred_std"))
         p = p + pn.geom_line()
         p = p + pn.facet_wrap("variable", scales="free_x", ncol=2)
-        p = p + pn.theme(figure_size=(6, 8))
         return p
