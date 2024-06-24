@@ -1,0 +1,7 @@
+numpy==1.25.0
+numpydoc==1.6.0
+pandas==2.2.0
+plotnine==0.12.4
+pydantic==2.5.3
+pydantic_core==2.14.6
+scikit-learn==1.5.0
