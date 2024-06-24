@@ -1,6 +1,6 @@
 #!python3
 
-from typing import Literal
+from typing import Literal, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,14 @@ def identity(x):
 
 
 class VisGrid:
-    def __init__(self, model: BaseEstimator, X: pd.DataFrame, y: pd.Series, n_points: int):
+    def __init__(
+        self,
+        model: BaseEstimator,
+        X: pd.DataFrame,
+        y: pd.Series,
+        n_points: int,
+        features: Optional[Union[list[str], list[tuple[str, str]]]] = None,
+    ):
         """
 
         TODO:
@@ -25,6 +32,24 @@ class VisGrid:
         self.X = X
         self.y = y
         self.n_points = n_points
+        if features is None:
+            self.features = self.X.columns.tolist()
+        else:
+            self.features = features
+
+    def _vary_feature(self, feature: str) -> pd.Series:
+        v = np.linspace(self.X[feature].min(), self.X[feature].max(), self.n_points)
+        return pd.Series(v, name=feature)
+
+    def _vary_features(self, feature: Union[str, tuple[str, str]]) -> pd.DataFrame:
+        if isinstance(feature, (list, tuple)):
+            col_values = [self._vary_feature(f).to_frame() for f in feature]
+            features_df = pd.merge(*col_values, how="cross")
+            col_values = features_df.apply("product", axis=1).rename(" ".join(feature))
+        else:
+            col_values = self._vary_feature(feature)
+            features_df = col_values.to_frame()
+        return col_values, features_df
 
     def make_grid_avg_predictors(self, agg_func: Literal["mean", "median"] = "mean") -> pd.DataFrame:
         """Make a grid varying each predictor along an even linear spacing, while holding other predictors constant
@@ -51,21 +76,21 @@ class VisGrid:
         """
         # loop over columns
         grid = []
-        for col in self.X.columns:
+        for col in self.features:
             # generate equally spaced samples
-            col_values = pd.Series(np.linspace(self.X[col].min(), self.X[col].max(), self.n_points), name=col)
+            col_values, features_df = self._vary_features(col)
 
             # cross with average value of each other column
-            other_features = self.X.drop(columns=col)
+            other_features = self.X.drop(columns=features_df.columns)
             other_features = getattr(other_features, agg_func)().to_frame().T
-            sub_grid = pd.merge(col_values, other_features, how="cross")
+            sub_grid = pd.merge(features_df, other_features, how="cross")
 
             # predict for every point in the grid
             y_pred = pd.Series(self.model.predict(sub_grid[self.X.columns]), name="ypred")
 
             # concatenate and add to list
-            sub_grid = pd.concat([sub_grid[col].rename("value"), y_pred], axis=1)
-            sub_grid = sub_grid.assign(variable=col)
+            sub_grid = pd.concat([col_values.rename("value"), y_pred], axis=1)
+            sub_grid = sub_grid.assign(variable=col_values.name)
             grid.append(sub_grid)
         grid = pd.concat(grid).reset_index(drop=True)
 
@@ -99,13 +124,21 @@ class VisGrid:
         """
         # generate equally spaced samples for each predictor
         col_vals = []
+        features_df = []
         for col in self.X.columns:
-            col_vals.append(pd.Series(np.linspace(self.X[col].min(), self.X[col].max(), self.n_points), name=col))
+            varried = self._vary_features(col)
+            col_vals.append(varried[0])
+            features_df.append(varried[1])
 
         # sequentially cross predictor series to generate the full combinatorial grid
-        grid = col_vals[0]
-        for col_val in col_vals[1:]:
+        grid = features_df[0]
+        for col_val in features_df[1:]:
             grid = pd.merge(grid, col_val, how="cross")
+
+        import ipdb
+        ipdb.set_trace()
+
+        self.features
 
         # predict response using the model
         y_pred = pd.Series(self.model.predict(grid), name="ypred")
@@ -250,7 +283,7 @@ class VisGrid:
 
         # create the grid
         grid = getattr(self, f"make_grid_{method}")()
-        grid["id"] = (grid.groupby("variable")["variable"].rank(method="first")-1).astype(int).tolist()
+        grid["id"] = (grid.groupby("variable")["variable"].rank(method="first") - 1).astype(int).tolist()
 
         # transform the grid
         grid_transformed = transformer(pd.pivot(grid, columns="variable", values="value", index="id"))
@@ -263,7 +296,7 @@ class VisGrid:
         observed = pd.concat([transformer(self.X), self.y.rename("y")], axis=1).melt(id_vars="y")
 
         # keep only the predictors in the grid
-        observed = observed[observed["variable"].isin(self.X.columns)]
+        observed = observed[observed["variable"].isin(self.features)]
 
         # make plot
         p = pn.ggplot(grid, pn.aes("value", "ypred"))
