@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from itertools import combinations
 from math import ceil, sqrt
 from numbers import Real
+from typing import Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,24 +15,13 @@ from qs_take_home.helpers.utils import validate_transform_output
 from scipy.cluster.hierarchy import dendrogram, leaves_list
 from scipy.stats import iqr
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import AgglomerativeClustering, FeatureAgglomeration
+from sklearn.decomposition import PCA
 from sklearn.feature_selection import SelectKBest, SelectorMixin, f_classif
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import scale
 from sklearn.utils._param_validation import Interval
 from sklearn.utils.validation import check_is_fitted
-
-
-def plot_r_coef(x, y, **kwargs):
-    ax = plt.gca()
-    corr_coef = np.corrcoef(x, y)[0, 1]
-    ax.annotate(
-        f"Corr: {corr_coef:.2f}",
-        xy=(0.5, 0.5),
-        xycoords="axes fraction",
-        ha="center",
-        fontsize="large",
-        color="red",
-    )
 
 
 @dataclass
@@ -325,3 +315,161 @@ class ScaledVarianceThreshold(SelectorMixin, BaseEstimator):
         p = p + pn.facet_wrap("~variable", scales="free")
         p = p + pn.theme_gray(base_size=16)
         return p
+
+
+class CorrFeatureAgglomeration(FeatureAgglomeration):
+    @staticmethod
+    def pool_by_pca(X, axis=1):
+        reduced = PCA(n_components=1).fit_transform(X).to_numpy()
+        return reduced.reshape(reduced.shape[0])
+
+    def __init__(self, r: float = 0.9):
+        """__init__.
+
+        Args:
+            r (float): maximum correlation coefficient allowed between a pair of predictors.
+        """
+        # inputs
+        self.r = r
+        super().__init__(
+            n_clusters=None,
+            metric="precomputed",
+            distance_threshold=1 - self.r,
+            linkage="complete",
+            pooling_func=self.pool_by_pca,
+        )
+
+    def fit(self, X, y=None):
+        corr_mat = 1 - X.corr().abs()
+        super().fit(corr_mat)
+        return self
+
+    @property
+    def linkage_matrix(self) -> np.ndarray:
+        """Create a matrix representing the linkage from an AgglomerativeClustering model
+            source: https://scikit-learn.org/stable/auto_examples/cluster/plot_agglomerative_dendrogram.html
+
+        Args:
+            model (cluster.AgglomerativeClustering): an agglomerative clustering model
+        """
+        # create the counts of samples under each node
+        counts = np.zeros(self.children_.shape[0])
+        n_samples = len(self.labels_)
+        for i, merge in enumerate(self.children_):
+            current_count = 0
+            for child_idx in merge:
+                if child_idx < n_samples:
+                    current_count += 1  # leaf node
+                else:
+                    current_count += counts[child_idx - n_samples]
+            counts[i] = current_count
+
+        return np.column_stack([self.children_, self.distances_, counts]).astype(float)
+
+
+class IterativeCorrFeatureAgglomeration(BaseEstimator, TransformerMixin):
+    def __init__(self, r: float = 0.9):
+        self.r = r
+        self.steps = []
+
+    def fit(self, X, y=None):
+        not_done = True
+        Xr = X.copy()
+        while not_done:
+            step = CorrFeatureAgglomeration(r=self.r)
+            step.fit(Xr)
+            Xr = step.transform(Xr)
+            not_done = np.any(np.triu(Xr.corr().abs(), k=1) > self.r)
+            self.steps.append(step)
+        return self
+
+    def transform(self, X, y=None):
+        X = X.copy()
+        for step in self.steps:
+            X = step.transform(X)
+        return X
+
+
+class FeatureAgglomerationDisplay:
+    def __init__(
+        self, X, transformer: Union[Union[CorrFeatureAgglomeration, IterativeCorrFeatureAgglomeration], Pipeline]
+    ):
+        """If PIpeline then Agglomeration transformer must be the last step
+        """
+
+        # set attributes
+        self.X = X
+        self.preproc = None
+        if isinstance(transformer, Pipeline):
+            self.transformer = transformer[-1]
+            self.preproc = transformer[:-1]
+        else:
+            self.transformer = transformer
+
+    def get_cluster_step(self, step_num: int = None):
+        if isinstance(self.transformer, IterativeCorrFeatureAgglomeration):
+            if step_num is None:
+                raise Exception("'step_num' required with IterativeCorrFeatureAgglomeration")
+            return self.transformer.steps[step_num]
+        else:
+            if step_num is not None:
+                raise Exception("'step_num' not useable with CorrFeatureAgglomeration")
+            return self.transformer
+
+    @property
+    def _X(self):
+        if self.preroc is not None:
+            return self.X
+        else:
+            return self.preproc.transform(self.X)
+
+    def plot_dendrogram(self, step_num: int = None) -> Figure:
+        """Create diagnostic plot with a clustering dendrogram and correlation heatmap.
+
+        Args:
+            X:
+
+        Returns:
+        """
+        fig, ax = plt.subplots()
+        step = self.get_cluster_step(step_num)
+        dendrogram(
+            step.linkage_matrix,
+            ax=ax,
+            color_threshold=1 - step.r,
+            orientation="right",
+            # labels=self.X.columns,
+        )
+        fig.tight_layout()
+        return fig
+
+    def plot_in_corr_map(self, X) -> Figure:
+        fig = sns.clustermap(X.corr(), annot=True, fmt=".2f")
+        return fig
+
+    def plot_out_corr_map(self, X) -> Figure:
+        Xr = self.transform(X)
+        fig = sns.clustermap(Xr.corr(), annot=True, fmt=".2f")
+        return fig
+
+    def plot_bivariate(self, X, correlated: bool = True) -> Figure:
+        """Make a list of pairs to plot of correlated pairs from each clustering step."""
+        if correlated:
+            pairs = sum([step.get_correlated_pairs() for step in self.clustering_steps_], [])
+        else:
+            pairs = list(combinations(self.get_feature_names_out(), r=2))
+
+        # create a plot
+        nrows = ceil(sqrt(len(pairs)))
+        if nrows != 0:
+            fig, axs = plt.subplots(nrows=nrows, ncols=ceil(len(pairs) / nrows))
+            if isinstance(axs, Axes):
+                pair = pairs[0]
+                sns.scatterplot(data=X[list(pair)], x=pair[0], y=pair[1], ax=axs)
+            else:
+                for i, (pair, ax) in enumerate(zip(pairs, axs.flat)):
+                    sns.scatterplot(data=X[list(pair)], x=pair[0], y=pair[1], ax=ax)
+            fig.tight_layout()
+        else:
+            fig, axs = plt.subplots()
+        return fig
