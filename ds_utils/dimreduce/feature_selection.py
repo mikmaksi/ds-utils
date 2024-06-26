@@ -96,10 +96,24 @@ class CorrFeatureAgglomeration(FeatureAgglomeration):
             pooling_func=self.pool_by_pca,
         )
 
+        # set attributes
+        self.metric_clusters = []
+
     def fit(self, X, y=None):
         dist_mat = 1 - X.corr().abs()
         dist_mat[dist_mat < 0] = 0
         super().fit(dist_mat)
+
+        # set metric clusters
+        for i, cluster_id in enumerate(np.unique(self.labels_)):
+            self.metric_clusters.append(
+                MetricCluster(
+                    cluster_id=cluster_id,
+                    selected=self.get_feature_names_out()[i],
+                    all_metrics=X.columns[self.labels_ == cluster_id],
+                )
+            )
+
         return self
 
     @property
@@ -128,32 +142,6 @@ class CorrFeatureAgglomeration(FeatureAgglomeration):
 
         return np.column_stack([self.children_, self.distances_, counts]).astype(float)
 
-
-@dataclass
-class MetricCluster:
-    cluster_id: int
-    selected: str
-    all_metrics: list[str]
-
-
-@dataclass
-class ClusteringStep:
-    step_num: int
-    model: CorrFeatureAgglomeration
-    metric_clusters: list[MetricCluster] = field(default_factory=list)  # set during fit
-
-    @property
-    def r(self) -> float:
-        return self.model.r
-
-    @property
-    def linkage_matrix(self) -> np.ndarray:
-        return self.model.linkage_matrix
-
-    @property
-    def leaf_order(self) -> list:
-        return self.model.leaf_order
-
     @property
     def correlated_pairs(self) -> list[tuple]:
         # make a list of pairs to plot
@@ -163,28 +151,18 @@ class ClusteringStep:
                 pairs.extend(list(combinations(metric_cluster.all_metrics, 2)))
         return pairs
 
-    def fit(self, X) -> None:
-        # fit the model
-        self.model.fit(X)
 
-        # set metric clusters
-        for i, cluster_id in enumerate(np.unique(self.model.labels_)):
-            self.metric_clusters.append(
-                MetricCluster(
-                    cluster_id=cluster_id,
-                    selected=self.model.get_feature_names_out()[i],
-                    all_metrics=X.columns[self.model.labels_ == cluster_id],
-                )
-            )
-
-    def transform(self, X) -> None:
-        return self.model.transform(X)
+@dataclass
+class MetricCluster:
+    cluster_id: int
+    selected: str
+    all_metrics: list[str]
 
 
 class IterativeCorrFeatureAgglomeration(BaseEstimator, TransformerMixin):
     def __init__(self, r: float = 0.9):
         self.r = r
-        self.steps: list[ClusteringStep] = []
+        self.steps: list[CorrFeatureAgglomeration] = []
 
     def fit(self, X, y=None):
         is_correlated = True
@@ -192,7 +170,7 @@ class IterativeCorrFeatureAgglomeration(BaseEstimator, TransformerMixin):
         step_num = 1
         while is_correlated:
             # run step
-            step = ClusteringStep(step_num, CorrFeatureAgglomeration(r=self.r))
+            step = CorrFeatureAgglomeration(r=self.r)
             step.fit(Xr)
             Xr = step.transform(Xr)
 
