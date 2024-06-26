@@ -151,6 +151,16 @@ class CorrFeatureAgglomeration(FeatureAgglomeration):
                 pairs.extend(list(combinations(metric_cluster.all_metrics, 2)))
         return pairs
 
+    @property
+    def out_in_feature_map(self) -> dict[str, list[str]]:
+        feature_map = {}
+        for metric_cluster in self.metric_clusters:
+            feature_map.setdefault(
+                metric_cluster.selected,
+                metric_cluster.all_metrics.tolist(),
+            )
+        return feature_map
+
 
 @dataclass
 class MetricCluster:
@@ -187,6 +197,24 @@ class IterativeCorrFeatureAgglomeration(BaseEstimator, TransformerMixin):
         for step in self.steps:
             X = step.transform(X)
         return X
+
+    @staticmethod
+    def sub_dict_values(first: dict, second: dict):
+        result = {}
+        for k, values in first.items():
+            new_values = []
+            for v in values:
+                new_values.extend(second[v])
+            result.setdefault(k, new_values)
+        return result
+
+    @property
+    def out_in_feature_map(self) -> dict[str, list[str]]:
+        feature_map_list = [step.out_in_feature_map for step in self.steps]
+        comb = feature_map_list[-1]
+        for step in feature_map_list[:-1][::-1]:
+            comb = self.sub_dict_values(comb, step)
+        return comb
 
 
 class FeatureAgglomerationDisplay:
